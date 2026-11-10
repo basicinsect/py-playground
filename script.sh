@@ -1,103 +1,71 @@
-cat > build-python312-zip.sh <<'BASH'
+cat > build-python312.sh <<'BASH'
 #!/usr/bin/env bash
 set -euo pipefail
 
-PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
-OUTPUT_DIR="${OUTPUT_DIR:-$PWD}"
+BUILD_ROOT="$PWD/python312-build"
+OUTPUT_DIR="$PWD/output"
 
-command -v curl >/dev/null || {
-    echo "Error: curl is required" >&2
-    exit 1
-}
+rm -rf "$BUILD_ROOT" "$OUTPUT_DIR"
+mkdir -p "$BUILD_ROOT" "$OUTPUT_DIR"
 
-# Install zip if Codespaces does not have it.
-if ! command -v zip >/dev/null; then
-    sudo apt-get update
-    sudo apt-get install -y zip
-fi
-
-# Install uv if unavailable.
-if ! command -v uv >/dev/null; then
+if ! command -v uv >/dev/null 2>&1; then
     curl -LsSf https://astral.sh/uv/install.sh | sh
     export PATH="$HOME/.local/bin:$PATH"
 fi
 
-mkdir -p "$OUTPUT_DIR"
-OUTPUT_DIR="$(realpath "$OUTPUT_DIR")"
+export UV_PYTHON_INSTALL_DIR="$BUILD_ROOT"
 
-echo "Installing Python $PYTHON_VERSION..."
-uv python install "$PYTHON_VERSION"
+# Force installation into BUILD_ROOT, even if system Python 3.12 exists.
+uv python install --reinstall 3.12
 
-# Resolve uv's symlinks to the actual installation.
-PYTHON_BIN="$(realpath "$(uv python find "$PYTHON_VERSION")")"
-PYTHON_ROOT="$(realpath "$(dirname "$PYTHON_BIN")/..")"
-ACTUAL_VERSION="$("$PYTHON_BIN" --version | awk '{print $2}')"
+PYTHON_DIR="$(
+    find "$BUILD_ROOT" \
+        -mindepth 1 \
+        -maxdepth 1 \
+        -type d \
+        -name 'cpython-3.12*linux*x86_64*' |
+    head -n 1
+)"
 
-BASE_NAME="python-${ACTUAL_VERSION}-linux-x86_64-uv"
-TARBALL="$OUTPUT_DIR/$BASE_NAME.tar.gz"
-CHECKSUM="$TARBALL.sha256"
-ZIP_FILE="$OUTPUT_DIR/$BASE_NAME.zip"
-
-STAGING="$(mktemp -d)"
-PACKAGE_DIR="$STAGING/cpython-${ACTUAL_VERSION}-linux-x86_64-gnu"
-
-cleanup() {
-    rm -rf "$STAGING"
-}
-trap cleanup EXIT
-
-echo "Copying actual Python installation..."
-mkdir -p "$PACKAGE_DIR"
-
-# -L follows symlinks instead of packaging broken Codespaces links.
-cp -aL "$PYTHON_ROOT"/. "$PACKAGE_DIR"/
-
-test -x "$PACKAGE_DIR/bin/python3" || {
-    echo "Error: staged package has no bin/python3" >&2
+if [[ -z "$PYTHON_DIR" ]]; then
+    echo "Error: no managed Python installation found in $BUILD_ROOT" >&2
+    find "$BUILD_ROOT" -maxdepth 2 -print >&2
     exit 1
-}
+fi
 
-"$PACKAGE_DIR/bin/python3" --version
+PYTHON_BIN="$PYTHON_DIR/bin/python3"
 
-echo "Creating tar.gz..."
+if [[ ! -x "$PYTHON_BIN" ]]; then
+    echo "Error: $PYTHON_BIN does not exist" >&2
+    exit 1
+fi
+
+VERSION="$("$PYTHON_BIN" --version | awk '{print $2}')"
+ARCHIVE="python-${VERSION}-linux-x86_64-uv.tar.gz"
+
+echo "Packaging: $PYTHON_DIR"
+"$PYTHON_BIN" --version
+
 tar \
-    -C "$STAGING" \
-    -czf "$TARBALL" \
-    "$(basename "$PACKAGE_DIR")"
+    -C "$BUILD_ROOT" \
+    -czf "$OUTPUT_DIR/$ARCHIVE" \
+    "$(basename "$PYTHON_DIR")"
 
-# Verify that tar.gz contains the real Python executable.
-tar -tzf "$TARBALL" |
-    grep -q "^$(basename "$PACKAGE_DIR")/bin/python3$" || {
-        echo "Error: tar.gz does not contain bin/python3" >&2
-        exit 1
-    }
+cd "$OUTPUT_DIR"
 
-# Write a relative filename into the checksum.
-(
-    cd "$OUTPUT_DIR"
-    sha256sum "$(basename "$TARBALL")" \
-        > "$(basename "$CHECKSUM")"
-)
+sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
 
-echo "Creating ZIP..."
-rm -f "$ZIP_FILE"
-
-(
-    cd "$OUTPUT_DIR"
-    zip -9 "$(basename "$ZIP_FILE")" \
-        "$(basename "$TARBALL")" \
-        "$(basename "$CHECKSUM")"
-)
-
-unzip -t "$ZIP_FILE" >/dev/null
+# Validate it contains Python but not the accidental /usr content.
+tar -tzf "$ARCHIVE" | grep -q '/bin/python3'
+if tar -tzf "$ARCHIVE" | grep -q '/share/terminfo/'; then
+    echo "Error: archive unexpectedly contains system terminfo files" >&2
+    exit 1
+fi
 
 echo
 echo "Created:"
-ls -lh "$ZIP_FILE"
-echo
-echo "Download this one file:"
-echo "$ZIP_FILE"
+ls -lh "$ARCHIVE" "$ARCHIVE.sha256"
 BASH
 
-chmod +x build-python312-zip.sh
-./build-python312-zip.sh
+chmod +x build-python312.sh
+./build-python312.sh
