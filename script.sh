@@ -41,5 +41,3 @@ ls -lh "$NAME" "$NAME.sha256"
 BASH
 
 chmod +x build-python312.sh && ./build-python312.sh
-
-
